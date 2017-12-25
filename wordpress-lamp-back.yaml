@@ -1,0 +1,47 @@
+heat_template_version: 2015-04-30
+
+parameters:
+  key_name:
+    type: string
+  instance_type:
+    type: string
+  image_id:
+    type: string
+  public_net_id:
+    type: string
+  private_net_id:
+    type: string
+  private_subnet_id:
+    type: string
+  security_group:
+    type: string
+  user_data:
+    type: string
+
+resources:
+  webserver:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image_id }
+      flavor: { get_param: instance_type }
+      key_name: { get_param: key_name }
+      networks:
+          - port: { get_resource: server_port }
+      user_data: {get_param: user_data}
+      user_data_format: RAW
+
+  server_port:
+    type: OS::Neutron::Port
+    properties:
+        network_id : { get_param: private_net_id }
+        allowed_address_pairs: [{"ip_address": "0.0.0.0/0"}]
+        fixed_ips:
+            - subnet_id: { get_param: private_subnet_id }
+        security_groups: [ { get_param: security_group }]
+
+outputs:
+  server_id:
+    value: { get_resource: webserver }
+  server_ip:
+    description: IP Address of server having volumes attached.
+    value: { get_attr: [server_port, fixed_ips, 0, ip_address] }

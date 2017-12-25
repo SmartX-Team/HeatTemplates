@@ -1,0 +1,60 @@
+heat_template_version: 2015-04-30
+
+description: >
+  An example Heat Orchestration Template (HOT).
+
+parameters:
+
+  public_net_id:
+      type: string
+      description: ID of public network for which floating IP addresses will be allocated
+
+  private_net_id:
+      type: string
+      description: ID of private network into which servers get deployed
+
+  private_subnet_id:
+      type: string
+      description: ID of private sub network into which servers get deployed
+
+resources:
+
+  WebServerPortGroup:
+      type: OS::Heat::ResourceGroup
+      properties:
+        count: 3
+        resource_def:
+          type: OS::Neutron::Port
+          properties:
+              name: webserver_port_%index%
+              network_id : { get_param: private_net_id }
+              fixed_ips:
+                  - subnet_id: { get_param: private_subnet_id }
+              security_groups: [{get_resource: WebServer_security_group }]
+
+  WebServer_security_group:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          description: Add security group rules for WebServer
+          name: security-group-web
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 22
+              port_range_max: 22
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 80
+              port_range_max: 80
+
+outputs:
+  WebsiteURL:
+    description: URL for Wordpress wiki
+    value:
+      str_replace:
+        template: host
+        params:
+          host: { get_attr: [WebServerPortGroup, resource.0, name] }
+

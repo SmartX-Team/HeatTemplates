@@ -1,0 +1,25 @@
+heat_template_version: 2015-04-30
+
+parameters:
+  keypair_name:
+    type: string
+    default: jshan
+  flavor:
+    type: string
+    default: m1.medium
+  image:
+    type: string
+    default: xenial
+
+resources:
+  logical_cluster_server:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: keypair_name }
+
+outputs:
+  logical_cluster_server_id:
+    value: { get_resource: logical_cluster_server }
+

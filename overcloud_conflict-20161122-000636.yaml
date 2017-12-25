@@ -1,0 +1,335 @@
+heat_template_version: 2015-10-15
+
+description: >
+  자라나라 머리머리
+  탈모갤러에게 탈모를!!
+
+parameters:
+
+  keypair_name:
+    type: string
+    description: Name of a key pair to enable SSH access to the instance
+    default: cwkim
+
+  image:
+    type: string
+    description: >
+      Name or ID of the image to use for the Ubuntu isntances.
+    default: xenial
+
+  overcloud_tower_flavor:
+    type: string
+    description: Flavor for OverCloud tower
+    default: m1.medium.lxd
+    constraints:
+      - allowed_values: [m1.tiny, m1.small, m1.medium, m1.medium.lxd, m1.large, m1.xlarge]
+        description: instance_type must be a valid instance type
+
+  overcloud_datalake_flavor:
+    type: string
+    description: Flavor for OverCloud tower
+    default: m1.medium.lxd
+    constraints:
+      - allowed_values: [m1.tiny, m1.small, m1.medium, m1.medium.lxd, m1.large, m1.xlarge]
+        description: instance_type must be a valid instance type
+
+  overcloud_logical_cluster_flavor:
+    type: string
+    description: Flavor for OverCloud logical clusters
+    default: m1.medium.lxd
+    constraints:
+      - allowed_values: [m1.tiny, m1.small, m1.medium, m1.medium.lxd, m1.large, m1.xlarge]
+        description: instance_type must be a valid instance type
+
+  logical_cluster_count:
+      type: number
+      description: Count of OverCloud logical clusters
+      default: 3
+
+  public_net:
+      type: string
+      description: ID of public network for which floating IP addresses will be allocated
+      default: 4f692f6a-d7db-4f29-9663-c7f5d93dad4d
+
+  private_net:
+      type: string
+      description: ID of private network into which servers get deployed
+      default: 25fbadfe-c7e8-4961-bbbb-90c1fd895c39
+
+  private_subnet:
+      type: string
+      description: ID of private sub network into which servers get deployed
+      default: d8a7d5a2-dfcc-40bc-92a9-2ee57a08daff
+
+  ssh_key_user_name:
+      type: string
+      default: ubuntu
+
+resources:
+  TowerServer:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: overcloud_tower_flavor }
+      key_name: { get_param: keypair_name }
+      networks:
+          - port: { get_resource: TowerServerPort }
+      user_data_format: SOFTWARE_CONFIG
+
+  TowerServerWaitCondition: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: TowerServerWaitHandle
+      timeout: 1000
+
+  TowerServerWaitHandle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  TowerServerPort:
+      type: OS::Neutron::Port
+      properties:
+          network_id : { get_param: private_net }
+          fixed_ips:
+              - subnet_id: { get_param: private_subnet }
+          security_groups: [{get_resource: TowerServerSecurityGroup }]
+
+  TowerServerSecurityGroup:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 1
+              port_range_max: 65535
+
+  TowerServerFloatingIP:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: TowerServerPort }
+
+  DataLakeServer:
+    type: OS::Nova::Server
+    depends_on: DataLakeServerWaitHandle
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: overcloud_datalake_flavor }
+      key_name: { get_param: keypair_name }
+      networks:
+          - port: { get_resource: DataLakeServerPort }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+
+            tee -a /etc/default/locale <<EOF > /dev/null
+            LANGUAGE="en_US.UTF8"
+            LC_ALL="en_US.UTF8"
+            LC_CTYPE="en_US.UTF8"
+            EOF
+
+            export LANGUAGE="en_US.UTF8"
+            export LC_ALL="en_US.UTF8"
+            export LC_CTYPE="en_US.UTF8"
+
+            # apt-get update
+            # apt-get -y upgrade
+
+            # apt-get -y install docker.io;
+            # apt-get remove -y apparmor apparmor-utils
+            # curl -L "https://github.com/docker/compose/releases/download/1.8.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+            # chmod +x /usr/local/bin/docker-compose
+            # curl -L https://github.com/docker/machine/releases/download/v0.8.2/docker-machine-`uname -s`-`uname -m` >/usr/local/bin/docker-machine && \
+            # chmod +x /usr/local/bin/docker-machine
+
+            wc_notify --data-binary '{"status": "SUCCESS"}' #'
+
+          params:
+            wc_notify: { get_attr: ['DataLakeServerWaitHandle', 'curl_cli'] }
+
+  DataLakeServerWaitCondition: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: DataLakeServerWaitHandle
+      timeout: 1000
+
+  DataLakeServerWaitHandle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  DataLakeServerPort:
+      type: OS::Neutron::Port
+      properties:
+          network_id : { get_param: private_net }
+          fixed_ips:
+              - subnet_id: { get_param: private_subnet }
+          security_groups: [{get_resource: DataLakeServerSecurityGroup }]
+
+  DataLakeServerSecurityGroup:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 1
+              port_range_max: 65535
+
+  LogicalClusterGroup:
+      type: OS::Heat::ResourceGroup
+      depends_on: TowerServerWaitCondition
+      properties:
+        count: { get_param: logical_cluster_count }
+        resource_def:
+          type: http://210.125.84.51/templates/overcloud_logical_cluster.yaml
+          properties:
+            keypair_name: { get_param: keypair_name }
+            flavor: { get_param: overcloud_logical_cluster_flavor }
+            image: { get_param: image}
+            public_net: { get_param: public_net }
+            private_net: { get_param: private_net }
+            private_subnet: { get_param: private_subnet }
+            security_group: { get_resource: LogicalClusterSecurityGroup }
+            ssh_key_user_name : { get_param: ssh_key_user_name }
+            ssh_key_pub: { get_attr: [do_key_gen, id_rsa_pub] }
+            ssh_key_test_tower: { get_resource: TowerServer }
+            init_user_data: 
+              str_replace:
+                template: |
+                  #!/bin/bash -v
+
+                  tee -a /etc/default/locale <<EOF > /dev/null
+                  LANGUAGE="en_US.UTF8"
+                  LC_ALL="en_US.UTF8"
+                  LC_CTYPE="en_US.UTF8"
+                  EOF
+
+                  export LANGUAGE="en_US.UTF8"
+                  export LC_ALL="en_US.UTF8"
+                  export LC_CTYPE="en_US.UTF8"
+
+                  # apt-get update
+                  # apt-get -y upgrade
+
+                  # apt-get -y install docker.io;
+                  # apt-get remove -y apparmor apparmor-utils
+                  # curl -L "https://github.com/docker/compose/releases/download/1.8.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+                  # chmod +x /usr/local/bin/docker-compose
+                  # curl -L https://github.com/docker/machine/releases/download/v0.8.2/docker-machine-`uname -s`-`uname -m` >/usr/local/bin/docker-machine && \
+                  # chmod +x /usr/local/bin/docker-machine
+
+                  wc_notify --data-binary '{"status": "SUCCESS"}' #'
+
+                params:
+                  wc_notify: { get_attr: ['LogicalClusterGroupWaitHandle', 'curl_cli'] }
+
+  LogicalClusterGroupWaitCondition: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: LogicalClusterGroupWaitHandle
+      timeout: 1000
+      count: { get_param: logical_cluster_count }
+
+  LogicalClusterGroupWaitHandle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  LogicalClusterSecurityGroup:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 1
+              port_range_max: 65535
+
+  setTower:
+    type: OS::Heat::SoftwareConfig
+    depends_on: TowerServerWaitHandle
+    properties:
+      inputs:
+        - name: wc_notify
+      group: script
+      config: |
+        #!/bin/bash -v
+
+        tee -a /etc/default/locale <<EOF > /dev/null
+        LANGUAGE="en_US.UTF8"
+        LC_ALL="en_US.UTF8"
+        LC_CTYPE="en_US.UTF8"
+        EOF
+
+        export LANGUAGE="en_US.UTF8"
+        export LC_ALL="en_US.UTF8"
+        export LC_CTYPE="en_US.UTF8"
+
+        # apt-get update
+        # apt-get -y upgrade
+
+        # apt-get -y install docker.io;
+        # apt-get remove -y apparmor apparmor-utils
+        # curl -L "https://github.com/docker/compose/releases/download/1.8.1/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose && \
+        # chmod +x /usr/local/bin/docker-compose
+        # curl -L https://github.com/docker/machine/releases/download/v0.8.2/docker-machine-`uname -s`-`uname -m` >/usr/local/bin/docker-machine && \
+        # chmod +x /usr/local/bin/docker-machine
+
+        # ssh-keygen -q -t rsa -f ~/.ssh/id_rsa -N ""
+
+        ${wc_notify} --data-binary '{"status": "SUCCESS"}' #'
+
+  do_setTower:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        wc_notify: { get_attr: ['TowerServerWaitHandle', 'curl_cli'] }
+      config:
+        get_resource: setTower
+      server:
+        get_resource: TowerServer
+
+  key_gen:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      inputs:
+        - name: user_name
+      outputs:
+        - name: id_rsa_pub
+      group: script
+      config: |
+        #!/bin/bash
+        su - ${user_name} << EOF > ${heat_outputs_path}.id_rsa_pub
+        test -f .ssh/id_rsa.pub || ssh-keygen -q -t rsa -N "" -f .ssh/id_rsa
+        cat .ssh/id_rsa.pub
+        EOF              
+  do_key_gen:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        user_name: { get_param: ssh_key_user_name }
+      config:
+        get_resource: key_gen
+      server:
+        get_resource: TowerServer
+
+outputs:
+  TowerURL:
+    description: Floating IP of Tower
+    value:
+      str_replace:
+        template: host
+        params:
+          host: { get_attr: [TowerServerFloatingIP, floating_ip_address] }
+  LogicalClusterFloatingIP:
+    description: Floating IPs of Logical Clusters
+    value:
+      str_replace:
+        template: host
+        params:
+          host: { list_join: ['\n', get_attr: [LogicalClusterGroup, logical_cluster_server_floating_ip]] }
+

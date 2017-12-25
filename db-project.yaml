@@ -1,0 +1,264 @@
+heat_template_version: 2015-10-15
+
+description: >
+    반질반질 탈모갤러에게도 봄은 오는가 / 응~ 안 와~
+
+parameters:
+
+  keypair_name:
+    type: string
+    description: Name of a key pair to enable SSH access to the instances
+    default: dbproject-scm
+
+  image:
+    type: string
+    description: >
+      Name or ID of the image to use for the Ubuntu isntances.
+    default: xenial
+
+  control_flavor:
+    type: string
+    description: Flavor for Control
+    default: m1.medium2.lxd
+    constraints:
+      - allowed_values: [m1.tiny, m1.small, m1.medium, m1.medium.lxd, m1.medium2.lxd, m1.large, m1.xlarge]
+        description: instance_type must be a valid instance type
+
+  slave_flavor:
+    type: string
+    description: Flavor for Slaves
+    default: m1.medium2.lxd
+    constraints:
+      - allowed_values: [m1.tiny, m1.small, m1.medium, m1.medium.lxd, m1.medium2.lxd, m1.large, m1.xlarge]
+        description: instance_type must be a valid instance type
+
+  slave_count:
+      type: number
+      description: Count of Slaves
+      default: 1
+
+  public_net:
+      type: string
+      description: ID of public network for which floating IP addresses will be allocated
+      default: 4f692f6a-d7db-4f29-9663-c7f5d93dad4d
+
+  private_net:
+      type: string
+      description: ID of private network into which servers get deployed
+      default: 25fbadfe-c7e8-4961-bbbb-90c1fd895c39
+
+  private_subnet:
+      type: string
+      description: ID of private sub network into which servers get deployed
+      default: d8a7d5a2-dfcc-40bc-92a9-2ee57a08daff
+
+  db_user:
+      type: string
+      description: Username of MySQL DB 
+      default: dbproject
+
+  db_password:
+      type: string
+      description: PW of MySQL DB user
+      default: fn!xo!ska!
+
+  db_root_password:
+      type: string
+      description: PW of MySQL DB root user
+      default: fn!xo!ska!
+
+  control_net_cidr:
+    type: string
+    description: Control network address (CIDR notation)
+
+  control_net_gateway:
+    type: string
+    description: Control network gateway address
+
+resources:
+  ControlServer:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: control_flavor }
+      key_name: { get_param: keypair_name }
+      networks:
+          - port: { get_resource: ControlServerPort }
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+
+            tee -a /etc/default/locale <<EOF > /dev/null
+            LANGUAGE="en_US.UTF8"
+            LC_ALL="en_US.UTF8"
+            LC_CTYPE="en_US.UTF8"
+            EOF
+
+            export LANGUAGE="en_US.UTF8"
+            export LC_ALL="en_US.UTF8"
+            export LC_CTYPE="en_US.UTF8"
+
+            apt-get update
+            apt-get -y upgrade
+
+            ## Installing Docker & Docker Compose
+
+            apt-get -y install docker.io
+            apt-get -y remove apparmor apparmor-utils
+
+            user_name="ubuntu"
+            usermod -aG docker $user_name
+
+            ## Installiny MySQL and Intel Snap
+
+            curl -s https://packagecloud.io/install/repositories/intelsdi-x/snap/script.deb.sh | bash
+            apt-get update
+            apt-get install -y snap-telemetry mysql-server mysql-client screen
+            mkdir -p /var/log/snap
+            screen -d -m -S snapteld snapteld --plugin-trust 0 --log-level 1 --log-path /var/log/snap
+
+            ## Config for control IP subnet
+            dev_name=`ip link | grep "^2: " | awk '{print $2}' | cut -d : -f 1`
+            ip address add control_net_gateway/`echo network_addr | cut -f2 -d"/"` dev $dev_name
+
+            mysqladmin -u root password 'mysql_root_password'
+            # Work needed for user creation and password config
+
+            
+
+            wc_notify --data-binary '{"status": "SUCCESS"}' #'
+
+          params:
+            wc_notify: { get_attr: ['ControlServerWaitHandle', 'curl_cli'] }
+            mysql_root_password: { get_param: db_root_password }
+            gateway_addr: { get_param: control_net_gateway }
+            network_addr: { get_param: control_net_cidr }
+
+  ControlServerWaitCondition: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: ControlServerWaitHandle
+      timeout: 1000
+
+  ControlServerWaitHandle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  ControlServerPort:
+      type: OS::Neutron::Port
+      properties:
+          network_id : { get_param: private_net }
+          allowed_address_pairs: [{"ip_address": "0.0.0.0/0"}]
+          fixed_ips:
+              - subnet_id: { get_param: private_subnet }
+          security_groups: [{get_resource: ControlServerSecurityGroup }]
+
+  ControlServerSecurityGroup:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 1
+              port_range_max: 65535
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: udp
+              port_range_min: 1
+              port_range_max: 65535
+
+  ControlServerFloatingIP:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: ControlServerPort }
+
+  SlaveGroup:
+      type: OS::Heat::ResourceGroup
+      properties:
+        count: { get_param: slave_count }
+        resource_def:
+          type: http://210.125.84.51/templates/db-project-slave.yaml
+          properties:
+            keypair_name: { get_param: keypair_name }
+            flavor: { get_param: slave_flavor }
+            image: { get_param: image}
+            public_net: { get_param: public_net }
+            private_net: { get_param: private_net }
+            private_subnet: { get_param: private_subnet }
+            security_group: { get_resource: SlaveSecurityGroup }
+            user_data:
+              str_replace:
+                template: |
+                  #!/bin/bash -v
+
+                  tee -a /etc/default/locale <<EOF
+                  LANGUAGE="en_US.UTF8"
+                  LC_ALL="en_US.UTF8"
+                  LC_CTYPE="en_US.UTF8"
+                  EOF
+
+                  export LANGUAGE="en_US.UTF8"
+                  export LC_ALL="en_US.UTF8"
+                  export LC_CTYPE="en_US.UTF8"
+
+                  apt-get update
+                  apt-get -y upgrade
+
+                  ## Installing Docker & Docker Compose
+
+                  apt-get -y install docker.io
+                  apt-get -y remove apparmor apparmor-utils
+
+                  user_name="ubuntu"
+                  usermod -aG docker $user_name
+
+                  wc_notify --data-binary '{"status": "SUCCESS"}' #'
+
+                params:
+                  wc_notify: { get_attr: ['SlaveGroupWaitHandle', 'curl_cli'] }
+
+  SlaveGroupWaitCondition: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: SlaveGroupWaitHandle
+      timeout: 1000
+      count: { get_param: slave_count }
+
+  SlaveGroupWaitHandle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  SlaveSecurityGroup:
+      type: OS::Neutron::SecurityGroup
+      properties:
+          rules:
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: icmp
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: tcp
+              port_range_min: 1
+              port_range_max: 65535
+            - remote_ip_prefix: 0.0.0.0/0
+              protocol: udp
+              port_range_min: 1
+              port_range_max: 65535
+
+outputs:
+  ControlURL:
+    description: Floating IP of Control
+    value:
+      str_replace:
+        template: host
+        params:
+          host: { get_attr: [ControlServerFloatingIP, floating_ip_address] }
+  SlaveFloatingIP:
+    description: Floating IPs of Slaves
+    value:
+      str_replace:
+        template: host
+        params:
+          host: { list_join: [', ', get_attr: [SlaveGroup, SlaveServerFloatingIPOutput]] }
+

@@ -1,0 +1,55 @@
+heat_template_version: 2015-04-30
+
+parameters:
+  keypair_name:
+    type: string
+  flavor:
+    type: string
+  image:
+    type: string
+  private_net:
+    type: string
+  private_subnet:
+    type: string
+  security_group:
+    type: string
+  user_data:
+    type: string
+  public_net:
+      type: string
+
+resources:
+  SlaveServer:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: keypair_name }
+      networks:
+          - port: { get_resource: SlaveServerPort }
+      user_data: { get_param: user_data }
+      user_data_format: RAW
+
+  SlaveServerPort:
+    type: OS::Neutron::Port
+    properties:
+        network_id : { get_param: private_net }
+        allowed_address_pairs: [{"ip_address": "0.0.0.0/0"}]
+        fixed_ips:
+            - subnet_id: { get_param: private_subnet }
+        security_groups: [ { get_param: security_group }]
+
+  SlaveServerFloatingIP:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: SlaveServerPort }
+
+outputs:
+  SlaveServerIDOutput:
+    value: { get_resource: SlaveServer }
+  SlaveServerIPOutput:
+    value: { get_attr: [SlaveServerPort, fixed_ips, 0, ip_address] }
+  SlaveServerFloatingIPOutput:
+    value: { get_attr: [SlaveServerFloatingIP, floating_ip_address] }
+

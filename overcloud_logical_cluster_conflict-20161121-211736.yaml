@@ -1,0 +1,120 @@
+heat_template_version: 2015-04-30
+
+parameters:
+  keypair_name:
+    type: string
+  flavor:
+    type: string
+  image:
+    type: string
+  private_net:
+    type: string
+  private_subnet:
+    type: string
+  security_group:
+    type: string
+  init_user_data:
+    type: string
+  public_net:
+    type: string
+  ssh_key_user_name:
+    type: string
+  ssh_key_pub:
+    type: string
+  ssh_key_test_tower:
+    type: string
+
+resources:
+  logical_cluster_server:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: keypair_name }
+      networks:
+          - port: { get_resource: logical_cluster_server_port }
+      user_data_format: SOFTWARE_CONFIG
+
+  logical_cluster_server_port:
+    type: OS::Neutron::Port
+    properties:
+        network_id : { get_param: private_net }
+        fixed_ips:
+            - subnet_id: { get_param: private_subnet }
+        security_groups: [ { get_param: security_group }]
+
+  logical_cluster_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: logical_cluster_server_port }
+
+  setLC:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      group: script
+      config: { get_param: init_user_data }
+  do_setLC:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+      config:
+        get_resource: setLC
+      server:
+        get_resource: logical_cluster_server
+
+  key_add:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      inputs:
+        - name: id_rsa_pub
+        - name: user_name
+      outputs:
+        - name: hostname
+      group: script
+      config: |
+        #!/bin/bash
+        echo "${id_rsa_pub}" | su - $user_name -c 'tee -a .ssh/authorized_keys'
+        hostname > ${heat_outputs_path}.hostname
+  do_key_add:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        user_name: { get_param: ssh_key_user_name }
+        id_rsa_pub: { get_param: ssh_key_pub }
+      config:
+        get_resource: key_add
+      server:
+        get_resource: logical_cluster_server
+
+  key_test:
+    type: OS::Heat::SoftwareConfig
+    properties:
+      inputs:
+        - name: user_name
+        - name: target
+      group: script
+      config: |
+        #!/bin/bash
+        su - ${user_name} << EOF
+        ssh -o StrictHostKeyChecking=no ${target} hostname
+        EOF
+  do_key_test:
+    type: OS::Heat::SoftwareDeployment
+    properties:
+      input_values:
+        user_name: { get_param: ssh_key_user_name }
+        target: { get_attr: [logical_cluster_server_port, fixed_ips, 0, ip_address] }
+      config:
+        get_resource: key_test
+      server: { get_param: ssh_key_test_tower }
+
+
+outputs:
+  logical_cluster_server_id:
+    value: { get_resource: logical_cluster_server }
+  logical_cluster_server_ip:
+    value: { get_attr: [logical_cluster_server_port, fixed_ips, 0, ip_address] }
+  logical_cluster_server_floating_ip:
+    value: { get_attr: [logical_cluster_floating_ip, floating_ip_address] }
+

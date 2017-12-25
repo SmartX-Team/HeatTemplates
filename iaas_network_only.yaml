@@ -1,0 +1,196 @@
+heat_template_version: 2013-05-23
+
+description: >
+  HOT template to create a new neutron network plus a router to the public
+  network, and for deploying two servers into the new network. The template also
+  assigns floating IP addresses to each server so they are routable from the
+  public network.
+
+parameters:
+  key_name:
+    type: string
+    description: Name of keypair to assign to servers
+  image:
+    type: string
+    description: Name of image to use for servers
+  flavor:
+    type: string
+    description: Flavor to use for servers
+  public_net:
+    type: string
+    description: >
+      ID or name of public network for which floating IP addresses will be allocated
+  private_net:
+    type: string
+    description: >
+      ID or name of private network for which the router will be placed
+  private_subnet:
+    type: string
+    description: >
+      ID or name of private subnet for which the router will be placed
+  secure_net_name:
+    type: string
+    description: Name of private network to be created
+  secure_net_cidr:
+    type: string
+    description: Private network address (CIDR notation)
+  secure_net_gateway:
+    type: string
+    description: Private network gateway address
+  secure_net_pool_start:
+    type: string
+    description: Start of private network IP address allocation pool
+  secure_net_pool_end:
+    type: string
+    description: End of private network IP address allocation pool
+
+resources:
+  server_router:
+    type: OS::Nova::Server
+    properties:      
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port:
+            get_resource: server_router_port_external
+        - port:
+            get_resource: server_router_port_internal
+      user_data:
+        str_replace:
+          template: |
+            #!/bin/bash -v
+
+            tee -a /etc/default/locale <<EOF
+            LANGUAGE="en_US.UTF8"
+            LC_ALL="en_US.UTF8"
+            LC_CTYPE="en_US.UTF8"
+            EOF
+            export LANGUAGE="en_US.UTF8"
+            export LC_ALL="en_US.UTF8"
+            export LC_CTYPE="en_US.UTF8"
+
+            apt-get update
+            # apt-get -y upgrade
+
+            apt-get -y install ipcalc
+            broadcast=`ipcalc -b secure_net_cidr_addr | grep Broadcast | awk '{print $2}'`
+            netmask=`ipcalc -b secure_net_cidr_addr | grep Netmask | awk '{print $2}'`
+            network=`ipcalc -b secure_net_cidr_addr | grep Network | awk '{print $2}' | cut -f1 -d"/"`
+
+            tee -a /etc/network/interfaces <<EOF
+            auto ens4
+            iface ens4 inet static
+              address gateway_addr
+              netmask $netmask
+              network $network
+              broadcast $broadcast
+            EOF
+            ifup ens4
+
+            echo net.ipv4.ip_forward=1 >> /etc/sysctl.conf
+            sysctl -w net.ipv4.ip_forward=1
+
+            iptables -t nat -A POSTROUTING -o ens3 -j MASQUERADE
+            iptables -A FORWARD -i ens3 -o ens4 -m state --state RELATED,ESTABLISHED -j ACCEPT
+            iptables -A FORWARD -i ens4 -o ens3 -j ACCEPT
+
+
+            apt-get -y install netfilter-persistent
+            netfilter-persistent save
+
+            wc_notify --data-binary '{"status": "SUCCESS"}' #'
+          params:
+            gateway_addr: { get_param: secure_net_gateway }
+            secure_net_cidr_addr: { get_param: secure_net_cidr }
+            wc_notify: { get_attr: ['router_wait_handle', 'curl_cli'] }
+
+  router_wait: 
+    type: "OS::Heat::WaitCondition"
+    properties: 
+      handle: 
+        get_resource: router_wait_handle
+      timeout: 1000
+
+  router_wait_handle: 
+    type: "OS::Heat::WaitConditionHandle"      
+
+  server_router_port_external:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_param: private_net }
+      fixed_ips:
+        - subnet_id: { get_param: private_subnet }
+
+  server_router_port_internal:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: secure_net }
+      allowed_address_pairs: [{"ip_address": "0.0.0.0/0"}]
+      fixed_ips:
+        - ip_address: { get_param: secure_net_gateway }
+
+  secure_net:
+    type: OS::Neutron::Net
+    properties:
+      name: { get_param: secure_net_name }
+
+  secure_subnet:
+    type: OS::Neutron::Subnet
+    properties:
+      network_id: { get_resource: secure_net }
+      cidr: { get_param: secure_net_cidr }
+      dns_nameservers: ["8.8.8.8", "8.8.4.4"]
+      gateway_ip: { get_param: secure_net_gateway }
+      allocation_pools:
+        - start: { get_param: secure_net_pool_start }
+          end: { get_param: secure_net_pool_end }
+
+  router_floating_ip:
+    type: OS::Neutron::FloatingIP
+    properties:
+      floating_network: { get_param: public_net }
+      port_id: { get_resource: server_router_port_external }
+
+  server1:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: server1_port }
+
+  server1_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: secure_net }
+      fixed_ips:
+        - subnet_id: { get_resource: secure_subnet }
+
+  server2:
+    type: OS::Nova::Server
+    properties:
+      image: { get_param: image }
+      flavor: { get_param: flavor }
+      key_name: { get_param: key_name }
+      networks:
+        - port: { get_resource: server2_port }
+
+  server2_port:
+    type: OS::Neutron::Port
+    properties:
+      network_id: { get_resource: secure_net }
+      fixed_ips:
+        - subnet_id: { get_resource: secure_subnet }
+
+outputs:
+  router_public_ip:
+    description: Floating IP address of the router in public network
+    value: { get_attr: [ router_floating_ip, floating_ip_address ] }
+  server1_private_ip:
+    description: IP address of server1 in secure network
+    value: { get_attr: [ server1, first_address ] }
+  server2_private_ip:
+    description: IP address of server2 in secure network
+    value: { get_attr: [ server2, first_address ] }
